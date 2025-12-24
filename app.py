@@ -15,7 +15,7 @@ def one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 def capitalize_address(addr: str) -> str:
-    """Iniziali maiuscole senza rovinare acronimi/punti (S., G., N.)."""
+    """Iniziali maiuscole senza rovinare acronimi/punti (es. 'S.', 'G.', 'N.')."""
     if not addr:
         return ""
     tokens = addr.split()
@@ -39,8 +39,7 @@ def parse_date_ggmmaaaa(text: str) -> str:
     if m:
         gg, mm, aaaa = m.groups()
         return f"{int(gg):02d}/{int(mm):02d}/{aaaa}"
-
-    # 2) gg Mese aaaa (con o senza 'Il', 'dal')
+    # 2) gg Mese aaaa (accetta 'Il', 'dal')
     mesi = {
         "gennaio": "01", "febbraio": "02", "marzo": "03", "aprile": "04",
         "maggio": "05", "giugno": "06", "luglio": "07", "agosto": "08",
@@ -83,7 +82,6 @@ def extract_elix_from_filename(filename: str) -> str:
             return str(int(m.group(1)))
         except ValueError:
             pass
-
     return "ELIX"
 
 def extract_text_from_pdf(file_like) -> str:
@@ -112,27 +110,68 @@ def get_section(text: str, start_pattern: str, end_pattern: str, flags=re.I | re
         return text[start_idx:end_idx]
     return text[start_idx:]
 
+# ---- Estrazioni robuste per durata & P.G. ----------------
+def extract_days(text: str) -> str:
+    """
+    Estrae il numero di 'giorni' (gg/giorni) con punteggiatura varia: '12 gg', '12gg.', '12 giorni'.
+    Restituisce stringa numerica oppure '' se non presente.
+    """
+    if not text:
+        return ""
+    patterns = [
+        r"\b(\d{1,3})\s*(?:gg|giorni)\b",
+        r"\b(\d{1,3})\s*(?:gg|giorni)[\.\,]?\b",
+        r"durata\s+presunta\s+di\s+(\d{1,3})\s*(?:gg|giorni)\b",
+    ]
+    t = re.sub(r"\s+", " ", text, flags=re.S)
+    for pat in patterns:
+        m = re.search(pat, t, flags=re.I)
+        if m:
+            return m.group(1)
+    return ""
+
+def has_hours(text: str) -> bool:
+    """Rileva se nel testo compaiono 'ore' con un numero (es. '4 ore')."""
+    if not text:
+        return False
+    return re.search(r"\b(\d{1,3})\s*ore\b", text, flags=re.I) is not None
+
+def extract_pg_from_responsabile(block: str) -> str:
+    """
+    Estrae il numero P.G. dalla PRIMA riga che contiene:
+    'Vista la richiesta P.G. n° ...' (variazioni: 'n.', 'n '), solo NUMERO, senza '/anno'.
+    """
+    if not block:
+        return ""
+    # Normalizza spazi/punteggiatura
+    b = re.sub(r"\s+", " ", block)
+    # Usa la PRIMA occorrenza
+    m = re.search(
+        r"Vista\s+la\s+richiesta\s+P\.?\s*G\.?\s*n[°\.\s]?([0-9]+)(?:\s*/\s*\d{2,4})?",
+        b,
+        flags=re.I
+    )
+    return m.group(1) if m else ""
+
 # ---------------------------------------------------------
-# Parsing secondo le tue regole (con correzioni richieste)
+# Parsing secondo le regole (con coerenza OGGETTO vs ORDINA e PG post RESPONSABILE)
 # ---------------------------------------------------------
 def parse_fields_from_pdf(filename: str, full_text: str):
     """
     Estrae i campi richiesti e verifica la coerenza:
-    - DATA INIZIO: OGGETTO vs blocco ORDINA
-    - P.G.: dalla riga 'Vista la richiesta P.G. n° ...' subito dopo 'IL RESPONSABILE DEL SETTORE'
+    - DATA INIZIO: OGGETTO vs blocco ORDINA (solo questi due, nessuna altra data)
+    - DURATA IN GIORNI: cerca gg/giorni in OGGETTO/ORDINA; se assenti ma ci sono 'ore' -> 1
+    - P.G.: dalla PRIMA riga con 'Vista la richiesta P.G. n° ...' subito dopo 'IL RESPONSABILE DEL SETTORE STRADE'
     """
     txt_all = full_text
 
     # --- Blocchi principali
-    # OGGETTO (fino a 'IL RESPONSABILE DEL SETTORE STRADE')
     m_obj = re.search(r"OGGETTO:\s*(.+?)IL RESPONSABILE DEL SETTORE STRADE", txt_all, flags=re.S | re.I)
     obj = one_line(m_obj.group(1)) if m_obj else ""
 
-    # Blocco RESPONSABILE --> fino a ORDINA (serve per P.G.)
-    responsabile_block = get_section(txt_all, r"IL RESPONSABILE DEL SETTORE", r"\bORDINA\b")
-
-    # Blocco ORDINA --> fino a DEMANDA o AVVERTE (serve per data/indirizzo/durata)
-    ordina_block = get_section(txt_all, r"\bORDINA\b", r"\b(DEMANDA|AVVERTE)\b")
+    responsabile_block = get_section(txt_all, r"IL RESPONSABILE DEL SETTORE STRADE", r"\bORDINA\b")
+    # Termine del blocco ORDINA: prima di DEMANDA / AVVERTE / (eventuale) IL RESPONSABILE ripetuto
+    ordina_block = get_section(txt_all, r"\bORDINA\b", r"\b(DEMANDA|AVVERTE|IL RESPONSABILE)\b")
 
     # --- Revoca (solo se OGGETTO contiene 'Revoca')
     revoca = ""
@@ -173,7 +212,6 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     data_inizio_ord = parse_date_ggmmaaaa(ordina_block or "")
     data_inizio = data_inizio_ord or data_inizio_obj or ""
 
-    # Coerenza: se entrambe presenti e uguali -> OK; se una assente -> OK; altrimenti non coerente
     if (data_inizio_obj and data_inizio_ord and data_inizio_obj == data_inizio_ord) or \
        (data_inizio_obj and not data_inizio_ord) or \
        (data_inizio_ord and not data_inizio_obj):
@@ -181,47 +219,29 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     else:
         esito_inizio = "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- DURATA IN GIORNI: se "gg/giorni" prendi numero; se "ore" => 1 (valuta OGGETTO e ORDINA)
-    durata_giorni = ""
-    m_dur_obj = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", obj, flags=re.I)
-    m_dur_ord = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", ordina_block or "", flags=re.I)
-
-    if m_dur_obj:
-        durata_giorni = m_dur_obj.group(1)
-    elif m_dur_ord:
-        durata_giorni = m_dur_ord.group(1)
+    # --- DURATA IN GIORNI: priorità a giorni in ORDINA, poi OGGETTO; se solo 'ore' -> 1
+    giorni_ord = extract_days(ordina_block or "")
+    giorni_obj = extract_days(obj)
+    if giorni_ord:
+        durata_giorni = giorni_ord
+    elif giorni_obj:
+        durata_giorni = giorni_obj
     else:
-        if re.search(r"\bore\b", obj, flags=re.I) or re.search(r"\bore\b", ordina_block or "", flags=re.I):
-            durata_giorni = "1"
+        durata_giorni = "1" if (has_hours(ordina_block or "") or has_hours(obj)) else ""
 
-    # Coerenza DURATA: se entrambe presenti e diverse -> non coerente, altrimenti OK
+    # Coerenza DURATA: se entrambi i blocchi indicano 'giorni' e sono diversi -> non coerente
     esito_durata = "OK Durata"
-    if m_dur_obj and m_dur_ord and (m_dur_obj.group(1) != m_dur_ord.group(1)):
+    if giorni_ord and giorni_obj and (giorni_ord != giorni_obj):
         esito_durata = "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- P.G. (numero di protocollo): PRIMA riga con "Vista la richiesta P.G. n° ..." nel blocco RESPONSABILE
-    pg = ""
-    if responsabile_block:
-        m_pg = re.search(
-            r"Vista\s+la\s+richiesta\s+P\.?\s*G\.?\s*n[°o.]?\s*([0-9]+)(?:\s*/\s*\d{2,4})?",
-            responsabile_block,
-            flags=re.I
-        )
-        if m_pg:
-            pg = m_pg.group(1)
-
-    # Fallback robusto su tutto il testo (nel caso in cui l'ordinanza sia formattata in modo inconsueto)
+    # --- P.G. (numero protocollo) dalla PRIMA riga nel blocco RESPONSABILE
+    pg = extract_pg_from_responsabile(responsabile_block)
+    # Fallback robusto se la formattazione è inconsueta
     if not pg:
         txt_pg = re.sub(r"\s+", " ", txt_all)
-        patterns = [
-            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o.]?\s*([0-9]+)(?:/\d{2,4})?",
-            r"richiesta\s+P\.?G\.?\s*n[°o.]?\s*([0-9]+)(?:/\d{2,4})?",
-        ]
-        for pat in patterns:
-            m2 = re.search(pat, txt_pg, flags=re.I)
-            if m2:
-                pg = m2.group(1)
-                break
+        m_fb = re.search(r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°\.\s]?([0-9]+)(?:\s*/\s*\d{2,4})?", txt_pg, flags=re.I)
+        if m_fb:
+            pg = m_fb.group(1)
 
     # --- Ditta / richiedente: dopo 'ditta ...' fino a virgola/;/\n
     ditta = ""
@@ -235,7 +255,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     tpu = "TRASPORTO_SI" if re.search(r"(trasporto pubblico urbano|linee bus|trasporto pubblico)", txt_low, flags=re.I) else "no T"
     ztl = "ZTL_SI" if re.search(r"\bztl\b|portali", txt_low, flags=re.I) else "no Z"
 
-    # DEMANDA: 'no D' se dopo 'DEMANDA' compare 'all’impresa'; altrimenti se delega a Settore/Servizio -> 'SQ. MULTIDISC. SI'
+    # DEMANDA: 'no D' se dopo 'DEMANDA' compare 'all’impresa'; se delega a Settore/Servizio -> 'SQ. MULTIDISC. SI'
     demanda = "no D"
     m_dem_block = re.search(r"\bDEMANDA\b(.{0,800})", txt_all, flags=re.I | re.S)
     if m_dem_block:
@@ -250,10 +270,10 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     bsm = "BRESCIA MOBILITA' SI" if re.search(r"brescia mobilita", txt_low, flags=re.I) else "no B"
     taxi = "TAXI SI" if re.search(r"\btaxi\b", txt_low, flags=re.I) else "no T"
 
-    # --- n. Elix e OGGETTO su un unico rigo
     elix = extract_elix_from_filename(filename)
     oggetto_unrigo = obj
 
+    # Restituisci anche le due date grezze per diagnostica
     return {
         "n. Elix": elix,
         "OGGETTO": oggetto_unrigo,
@@ -274,7 +294,12 @@ def parse_fields_from_pdf(filename: str, full_text: str):
         "Terzultimo": "OK Indirizzo" if esito_indirizzo == "OK Indirizzo" else "INDIRIZZO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
         "Penultimo": "OK Inizio" if esito_inizio == "OK Inizio" else "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
         "Ultimo": "OK Durata" if esito_durata == "OK Durata" else "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
-        "Revoca (se presente)": revoca or ""
+        "Revoca (se presente)": revoca or "",
+        # Diagnostica (NON finisce nell’Excel)
+        "_DATA_OGGETTO": data_inizio_obj or "",
+        "_DATA_ORDINA": data_inizio_ord or "",
+        "_GIORNI_OGGETTO": giorni_obj or "",
+        "_GIORNI_ORDINA": giorni_ord or ""
     }
 
 # ---------------------------------------------------------
@@ -296,12 +321,14 @@ uploaded_files = st.file_uploader(
 )
 
 order_by_elix = st.checkbox("Ordina colonne per n. Elix (crescente)", value=True)
+show_diag = st.checkbox("Mostra diagnostica (date/durata)", value=True)
 
 # ---------------------------------------------------------
 # BLOCCO "Genera XLS"
 # ---------------------------------------------------------
 if uploaded_files and st.button("Genera XLS"):
     records = []
+    diag_rows = []  # tabella diagnostica
     progress = st.progress(0)
     total = len(uploaded_files)
 
@@ -313,9 +340,25 @@ if uploaded_files and st.button("Genera XLS"):
 
         # Warning se campi critici mancanti
         if fields.get("n. Elix", "") == "ELIX":
-            st.warning(f"⚠️ Impossibile ricavare n. Elix dal nome file: {uf.name}")
+            st.warning(f"⚠️ ELIX non ricavato dal nome file: {uf.name}")
         if not fields.get("N. di protocollo della richiesta P.G.", ""):
             st.warning(f"⚠️ Numero P.G. non trovato nel blocco 'Vista la richiesta P.G. n°': {uf.name}")
+
+        # Diagnostica: memorizza dati
+        if show_diag:
+            diag_rows.append({
+                "PDF": uf.name,
+                "Data OGGETTO": fields.get("_DATA_OGGETTO", ""),
+                "Data ORDINA": fields.get("_DATA_ORDINA", ""),
+                "Giorni OGGETTO": fields.get("_GIORNI_OGGETTO", ""),
+                "Giorni ORDINA": fields.get("_GIORNI_ORDINA", ""),
+                "Esito data": "OK Inizio" if fields.get("Penultimo") == "OK Inizio" else "NON COERENTE",
+                "Esito giorni": "OK Durata" if fields.get("Ultimo") == "OK Durata" else "NON COERENTE",
+            })
+
+        # Ripulisci chiavi diagnostiche prima dell'Excel
+        for k in ["_DATA_OGGETTO", "_DATA_ORDINA", "_GIORNI_OGGETTO", "_GIORNI_ORDINA"]:
+            fields.pop(k, None)
 
     # Ordina per n. Elix crescente
     if order_by_elix:
@@ -347,14 +390,3 @@ if uploaded_files and st.button("Genera XLS"):
     with pd.ExcelWriter(xls_buffer, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="ordinanze")
 
-    st.success(f"Excel generato ({len(records)} colonne / PDF).")
-    st.download_button(
-        label="Scarica Excel",
-        data=xls_buffer.getvalue(),
-        file_name="ordinanze.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    # (facoltativo) Piccola anteprima
-    st.subheader("Anteprima (prime righe)")
-    st.dataframe(df.head(10))
