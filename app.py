@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -7,17 +6,20 @@ from io import BytesIO
 from PyPDF2 import PdfReader
 
 # -----------------------------
-# Utility: normalizzazioni
+# Utility: normalizzazioni / OCR
 # -----------------------------
 def one_line(text: str) -> str:
+    """Collassa spazi e ripulisce artefatti OCR (specie cifre spezzate)."""
     if not text:
         return ""
-    # comprime spazi/nuove righe e ripulisce artefatti OCR
-    t = re.sub(r"\s+", " ", text)
-    t = t.replace(" .", ".").replace(" ,", ",")
-    # ricompone alcuni frammenti tipici OCR
-    t = t.replace("0 8.00", "08.00").replace("g iorni", "giorni").replace("gg .", "gg.")
-    return t.strip()
+    t = re.sub(r"\s+", " ", text).strip()
+    # 1) Collassa spazi interni tra cifre: "2 9"->"29", "1 2"->"12"
+    t = re.sub(r"(?<=\d)\s+(?=\d)", "", t)
+    # 2) Fix mirati tipici
+    t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
+    t = re.sub(r"\bgiorn\s+i\b", "giorni", t, flags=re.I)
+    t = t.replace("0 8.00", "08.00")
+    return t
 
 def capitalize_mixed(s: str) -> str:
     if not s:
@@ -66,10 +68,10 @@ MESE2NUM = {
 }
 
 def parse_date_ggmmaaaa(text: str) -> str:
+    """Priorità a forma testuale (29 Dicembre 2025), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
     if not text:
         return ""
     t = one_line(text)
-    # forme testuali: "dal/del/il 29 Dicembre 2025" o "dalle ore 08.00 del 29 Dicembre 2025"
     pat_txt = re.compile(
         r"(?:\b(?:il|dal|del)\b\s*)?"
         r"(?:dalle\s+ore\s+\d{1,2}[.:]\d{2}\s+del\s+)?"
@@ -89,13 +91,13 @@ def parse_date_ggmmaaaa(text: str) -> str:
     return ""
 
 def extract_days(text: str) -> str:
-    """Robusto a OCR: estrae 12 da '12 gg', '12gg.', '12 giorni', '12 g'."""
+    """Robusto a OCR: estrae 12 da '12 gg', '1 2 gg', '12 giorni', 'g i o r n i' ecc."""
     if not text:
         return ""
     t = one_line(text).lower()
-    # protezione contro match di civici (es. "32/A"): richiediamo parole chiave gg/giorni
-    m = re.search(r"\b(\d{1,3})\s*(?:gg\.?|giorni?|g)\b", t, flags=re.I)
-    return m.group(1) if m else ""
+    # numero con spazi interni tra cifre (+ parole gg/giorni anche 'spezzate')
+    m = re.search(r"\b((?:\d\s*){1,3})\s*(?:gg\.?|g\s*g\.?|g\s*i\s*o\s*r\s*n\s*i|giorni?)\b", t, flags=re.I)
+    return re.sub(r"\s+", "", m.group(1)) if m else ""
 
 def has_hours(text: str) -> bool:
     if not text:
@@ -135,9 +137,8 @@ def extract_pg(text_block: str, full_text: str) -> str:
 STREET_PREFIX = r"(?:via|viale|corso|piazza|largo|piazzale|contrada|vicolo|galleria|tangenziale|strada|rotonda|cavalcavia|lungo|lung|p\.?zza|parco|sp|ss|sr)"
 STREET_RGX = re.compile(rf"\b({STREET_PREFIX}\s+[A-Za-zÀ-ÖØ-öø-ÿ0-9./\- ]+)", re.I)
 
-# Delimitatori/stop parole che NON devono far parte dell'indirizzo
 ADDR_STOPS = re.compile(
-    r"\s*(?: - | – | — |,|;|\.|\bprovvedimenti\b|\bdivieto\b|\bdalle\b|\bdal\b|\bdel\b|\bdurata\b|\bper\b)",
+    r"\s*(?:[-–—]\s*|,|;|\.|\bprovvedimenti\b|\bdivieto\b|\bdalle\b|\bdal\b|\bdel\b|\bdurata\b|\bper\b)",
     re.I
 )
 
@@ -145,11 +146,9 @@ def clean_address(s: str) -> str:
     if not s:
         return ""
     s1 = one_line(s)
-    # tronca all'eventuale delimitatore
     m = ADDR_STOPS.search(s1)
     if m:
-        s1 = s1[:m.start()]
-    # rimuove eventuali code come "in prossimità ..." o "lato ..."
+        s1 = s1[:m.start()].strip()
     s1 = re.split(r"\b(in prossimità|lato|nei pressi|area|zone|civico|civici)\b", s1, flags=re.I)[0].strip()
     return capitalize_mixed(s1)
 
@@ -178,7 +177,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     if m_gw:
         geoworks = m_gw.group(1)
 
-    # INDIRIZZO: cerca in OGGETTO, altrimenti in ORDINA; pulisce ai delimitatori
+    # INDIRIZZO: OGGETTO poi ORDINA; pulizia ai delimitatori
     addr_obj = ""
     mo = STREET_RGX.search(obj)
     if mo:
@@ -190,7 +189,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
 
     indirizzo = addr_obj or addr_ord
 
-    # Coerenza indirizzo (solo tra OGGETTO e ORDINA, ignorando intestazioni)
+    # Coerenza indirizzo (solo tra OGGETTO e ORDINA)
     def norm(a): return re.sub(r"\s+", " ", a or "").strip().lower()
     addr_ok = (
         (addr_obj and addr_ord and norm(addr_obj) == norm(addr_ord)) or
