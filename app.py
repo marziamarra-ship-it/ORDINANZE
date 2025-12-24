@@ -1,3 +1,4 @@
+
 # app.py
 import streamlit as st
 import pandas as pd
@@ -21,7 +22,7 @@ def capitalize_address(addr: str) -> str:
     tokens = addr.split()
     out = []
     for w in tokens:
-        if re.match(r"^[A-Z]\.$", w):  # es. "S." "G."
+        if re.match(r"^[A-Z]\.$", w):  # es. "S.", "G."
             out.append(w)
         else:
             out.append(w.capitalize())
@@ -55,21 +56,37 @@ def parse_date_ggmmaaaa(text: str) -> str:
 
 def extract_elix_from_filename(filename: str) -> str:
     """
-    Ultimo numero ALLA FINE del nome del file prima dell’ultimo '_', senza zeri iniziali.
-    Es.: '..._02569.pdf' -> '2569'. Se non leggibile -> 'ELIX'.
+    Regola utente: ultimo numero alla fine del nome file PDF,
+    dopo l’ultimo '_' e prima di '.pdf'. Senza zeri iniziali.
+    Se non trovabile -> 'ELIX'.
     """
     if not filename:
         return "ELIX"
     base = filename.rsplit("/", 1)[-1]
-    base = base[:-4] if base.lower().endswith(".pdf") else base
-    parts = base.split("_")
-    if not parts:
-        return "ELIX"
-    tail = parts[-1]
-    m = re.search(r"(\d+)$", tail)
-    if not m:
-        return "ELIX"
-    return str(int(m.group(1)))  # rimuove zeri iniziali
+    # Togli suffisso .pdf (minuscolo/maiuscolo)
+    if base.lower().endswith(".pdf"):
+        base = base[:-4]
+
+    # 1) Prendi il segmento dopo l'ultimo '_' e prova come numerico
+    last_us_idx = base.rfind("_")
+    if last_us_idx != -1 and last_us_idx < len(base) - 1:
+        tail = base[last_us_idx + 1 :]
+        if re.fullmatch(r"\d+", tail):
+            try:
+                return str(int(tail))  # rimuove zeri iniziali
+            except ValueError:
+                pass
+
+    # 2) Fallback: cerca l'ultimo gruppo di cifre vicino alla fine
+    m = re.search(r"(\d+)$", base)
+    if m:
+        try:
+            return str(int(m.group(1)))
+        except ValueError:
+            pass
+
+    # 3) Se non trovato
+    return "ELIX"
 
 def extract_text_from_pdf(file_like) -> str:
     """Estrae testo concatenando tutte le pagine del PDF."""
@@ -157,11 +174,30 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     if m_dur_body and durata_giorni and (m_dur_body.group(1) != durata_giorni):
         esito_durata = "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- P.G.: solo numero senza '/anno'
+    # --- P.G.: solo numero senza '/anno' (robusto a varianti)
     pg = ""
-    m_pg = re.search(r"P\.G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?", txt_all, flags=re.I)
-    if m_pg:
-        pg = m_pg.group(1)
+    txt_pg = re.sub(r"\s+", " ", txt_all)  # normalizza spazi
+
+    patterns = [
+        # P.G. (o PG / P G) + n (con o senza °/o) + numero + opzionale /anno
+        r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
+        # Solo P.G. seguito da numero (senza 'n')
+        r"(?:P\.?\s*G\.?|PG|P\s*G)\s*([0-9]+)(?:/\d{2,4})?",
+        # Variante con 'richiesta P.G.'
+        r"richiesta\s+P\.?G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
+    ]
+
+    for pat in patterns:
+        m_pg = re.search(pat, txt_pg, flags=re.I)
+        if m_pg:
+            pg = m_pg.group(1)
+            break
+
+    # Fallback: cerca cluster intorno a "P.G" se non già catturato
+    if not pg:
+        m_fallback = re.search(r"(?:P\.?\s*G\.?|PG|P\s*G)[^0-9]{0,20}([0-9]+)(?:/\d{2,4})?", txt_pg, flags=re.I)
+        if m_fallback:
+            pg = m_fallback.group(1)
 
     # --- Ditta / richiedente: dopo 'ditta ...' fino a virgola/;/\n
     ditta = ""
@@ -251,6 +287,12 @@ if uploaded_files and st.button("Genera XLS"):
         records.append((uf.name, fields))
         progress.progress(int(idx / total * 100))
 
+        # AVVISI per campi critici mancanti
+        if fields.get("n. Elix", "") == "ELIX":
+            st.warning(f"⚠️ Impossibile ricavare n. Elix dal nome file: {uf.name}")
+        if not fields.get("N. di protocollo della richiesta P.G.", ""):
+            st.warning(f"⚠️ Numero P.G. non trovato nel testo: {uf.name}")
+
     # Ordina per n. Elix crescente
     if order_by_elix:
         def elix_key(item):
@@ -292,4 +334,3 @@ if uploaded_files and st.button("Genera XLS"):
     # (facoltativo) Piccola anteprima
     st.subheader("Anteprima (prime righe)")
     st.dataframe(df.head(10))
-
