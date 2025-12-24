@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -31,22 +30,23 @@ def capitalize_address(addr: str) -> str:
 def parse_date_ggmmaaaa(text: str) -> str:
     """
     Rileva 'gg/mm/aaaa' oppure 'gg Mese aaaa' e restituisce 'gg/mm/aaaa'.
+    Funziona anche con 'Il 29 Dicembre 2025' e 'dal 29 Dicembre 2025'.
     """
     if not text:
         return ""
-    # 1) formato gg/mm/aaaa
+    # 1) gg/mm/aaaa
     m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
     if m:
         gg, mm, aaaa = m.groups()
         return f"{int(gg):02d}/{int(mm):02d}/{aaaa}"
 
-    # 2) formato '29 Dicembre 2025'
+    # 2) gg Mese aaaa (con o senza 'Il', 'dal')
     mesi = {
         "gennaio": "01", "febbraio": "02", "marzo": "03", "aprile": "04",
         "maggio": "05", "giugno": "06", "luglio": "07", "agosto": "08",
         "settembre": "09", "ottobre": "10", "novembre": "11", "dicembre": "12"
     }
-    m2 = re.search(r"\b(\d{1,2})\s+([A-Za-zÀ-ù]+)\s+(\d{4})\b", text, flags=re.IGNORECASE)
+    m2 = re.search(r"\b(?:il|dal)?\s*(\d{1,2})\s+([A-Za-zÀ-ù]+)\s+(\d{4})\b", text, flags=re.IGNORECASE)
     if m2:
         gg, mese, aaaa = m2.groups()
         mm = mesi.get(mese.lower())
@@ -67,7 +67,7 @@ def extract_elix_from_filename(filename: str) -> str:
     if base.lower().endswith(".pdf"):
         base = base[:-4]
 
-    # 1) Prendi il segmento dopo l'ultimo '_' e prova come numerico
+    # 1) Segmento dopo l'ultimo '_'
     last_us_idx = base.rfind("_")
     if last_us_idx != -1 and last_us_idx < len(base) - 1:
         tail = base[last_us_idx + 1 :]
@@ -77,7 +77,7 @@ def extract_elix_from_filename(filename: str) -> str:
             except ValueError:
                 pass
 
-    # 2) Fallback: cerca l'ultimo gruppo di cifre vicino alla fine
+    # 2) Fallback: ultimo gruppo di cifre a fine nome
     m = re.search(r"(\d+)$", base)
     if m:
         try:
@@ -85,7 +85,6 @@ def extract_elix_from_filename(filename: str) -> str:
         except ValueError:
             pass
 
-    # 3) Se non trovato
     return "ELIX"
 
 def extract_text_from_pdf(file_like) -> str:
@@ -96,6 +95,23 @@ def extract_text_from_pdf(file_like) -> str:
         t = p.extract_text() or ""
         texts.append(t)
     return "\n".join(texts)
+
+def get_section(text: str, start_pattern: str, end_pattern: str, flags=re.I | re.S) -> str:
+    """
+    Restituisce la sottostringa tra 'start_pattern' e 'end_pattern' (esclusi).
+    Se non trova i limiti, restituisce stringa vuota.
+    """
+    if not text:
+        return ""
+    m = re.search(start_pattern, text, flags=flags)
+    if not m:
+        return ""
+    start_idx = m.end()
+    m2 = re.search(end_pattern, text[start_idx:], flags=flags)
+    if m2:
+        end_idx = start_idx + m2.start()
+        return text[start_idx:end_idx]
+    return text[start_idx:]  # fino alla fine se non c'è end
 
 # ---------------------------------------------------------
 # Parsing secondo le regole
@@ -118,7 +134,6 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     # --- Revoca (solo se 'OGGETTO:' contiene 'Revoca')
     revoca = ""
     if re.search(r"OGGETTO:\s*Revoca", txt_all, flags=re.I):
-        # frase dopo "Data la necessità di revocare l’ordinanza P.G. n." fino al ';'
         m_rev = re.search(r"Data la necessità di revocare l’ordinanza P\.G\. n\.[^.\n]*?per\s+([^;]+);", txt_all, flags=re.I)
         if m_rev:
             revoca = one_line(m_rev.group(1))
@@ -136,7 +151,9 @@ def parse_fields_from_pdf(filename: str, full_text: str):
         addr_obj = one_line(m_addr_obj.group(1))
 
     addr_body = ""
-    m_addr_body = re.search(r"(via\s+[A-Za-z0-9.\sÀ-ù]+)", txt_all, flags=re.I)
+    # Se possibile, cerca l'indirizzo nel blocco ORDINA (più vicino alla decisione)
+    ordina_block = get_section(txt_all, r"\bORDINA\b", r"\b(DEMANDA|AVVERTE)\b")
+    m_addr_body = re.search(r"(via\s+[A-Za-z0-9.\sÀ-ù]+)", ordina_block or txt_all, flags=re.I)
     if m_addr_body:
         addr_body = one_line(m_addr_body.group(1))
 
@@ -150,54 +167,58 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     )
     esito_indirizzo = "OK Indirizzo" if addr_ok else "INDIRIZZO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- DATA INIZIO: preferisci oggetto; verifica coerenza con corpo
+    # --- DATA INIZIO: oggetto vs sezione ORDINA (non tutto il corpo)
     data_inizio_obj = parse_date_ggmmaaaa(obj)
-    data_inizio_body = parse_date_ggmmaaaa(txt_all)
-    data_inizio = data_inizio_obj or data_inizio_body or ""
+    data_inizio_ord = parse_date_ggmmaaaa(ordina_block) if ordina_block else ""
+    # fallback: se non trovata in ORDINA, cerca nel corpo (ma la coerenza si valuta OGGETTO vs ORDINA)
+    data_inizio_body_fallback = parse_date_ggmmaaaa(txt_all) if not data_inizio_ord else ""
+    data_inizio = data_inizio_ord or data_inizio_obj or data_inizio_body_fallback or ""
+
     esito_inizio = "OK Inizio" if (
-        (data_inizio_obj and data_inizio_body and data_inizio_obj == data_inizio_body) or
-        (data_inizio_obj and not data_inizio_body) or
-        (data_inizio_body and not data_inizio_obj)
+        (data_inizio_obj and data_inizio_ord and data_inizio_obj == data_inizio_ord) or
+        (data_inizio_obj and not data_inizio_ord) or
+        (data_inizio_ord and not data_inizio_obj)
     ) else "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- DURATA IN GIORNI: se "gg/giorni" prendi numero; se "ore" => 1
+    # --- DURATA IN GIORNI: se "gg/giorni" prendi numero; se "ore" => 1 (valuta oggetto e ORDINA)
     durata_giorni = ""
     m_dur_obj = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", obj, flags=re.I)
     if m_dur_obj:
         durata_giorni = m_dur_obj.group(1)
     else:
-        if re.search(r"\bore\b", obj, flags=re.I) or re.search(r"\bore\b", txt_all, flags=re.I):
+        if re.search(r"\bore\b", obj, flags=re.I) or re.search(r"\bore\b", ordina_block or txt_all, flags=re.I):
             durata_giorni = "1"
 
     esito_durata = "OK Durata"
-    m_dur_body = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", txt_all, flags=re.I)
-    if m_dur_body and durata_giorni and (m_dur_body.group(1) != durata_giorni):
+    m_dur_ord = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", ordina_block or "", flags=re.I)
+    if m_dur_ord and durata_giorni and (m_dur_ord.group(1) != durata_giorni):
         esito_durata = "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- P.G.: solo numero senza '/anno' (robusto a varianti)
+    # --- P.G.: estrazione dal blocco tra "IL RESPONSABILE..." e "ORDINA"
     pg = ""
-    txt_pg = re.sub(r"\s+", " ", txt_all)  # normalizza spazi
-
-    patterns = [
-        # P.G. (o PG / P G) + n (con o senza °/o) + numero + opzionale /anno
-        r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
-        # Solo P.G. seguito da numero (senza 'n')
-        r"(?:P\.?\s*G\.?|PG|P\s*G)\s*([0-9]+)(?:/\d{2,4})?",
-        # Variante con 'richiesta P.G.'
-        r"richiesta\s+P\.?G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
-    ]
-
-    for pat in patterns:
-        m_pg = re.search(pat, txt_pg, flags=re.I)
+    responsabile_block = get_section(txt_all, r"IL RESPONSABILE DEL SETTORE", r"\bORDINA\b")
+    if responsabile_block:
+        # Cerca "Vista la richiesta P.G. n° 123456/2025"
+        m_pg = re.search(r"Vista\s+la\s+richiesta\s+P\.?\s*G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?", responsabile_block, flags=re.I)
         if m_pg:
             pg = m_pg.group(1)
-            break
-
-    # Fallback: cerca cluster intorno a "P.G" se non già catturato
+    # Fallback robusto su tutto il testo in caso di varianti
     if not pg:
-        m_fallback = re.search(r"(?:P\.?\s*G\.?|PG|P\s*G)[^0-9]{0,20}([0-9]+)(?:/\d{2,4})?", txt_pg, flags=re.I)
-        if m_fallback:
-            pg = m_fallback.group(1)
+        txt_pg = re.sub(r"\s+", " ", txt_all)
+        patterns = [
+            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
+            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*([0-9]+)(?:/\d{2,4})?",
+            r"richiesta\s+P\.?G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
+        ]
+        for pat in patterns:
+            m2 = re.search(pat, txt_pg, flags=re.I)
+            if m2:
+                pg = m2.group(1)
+                break
+        if not pg:
+            m3 = re.search(r"(?:P\.?\s*G\.?|PG|P\s*G)[^0-9]{0,20}([0-9]+)(?:/\d{2,4})?", txt_pg, flags=re.I)
+            if m3:
+                pg = m3.group(1)
 
     # --- Ditta / richiedente: dopo 'ditta ...' fino a virgola/;/\n
     ditta = ""
@@ -212,7 +233,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
 
     # DEMANDA: 'no D' se dopo 'DEMANDA' compare 'all’impresa'; altrimenti se delega a Settore/Servizio -> 'SQ. MULTIDISC. SI'
     demanda = "no D"
-    m_dem_block = re.search(r"DEMANDA(.{0,800})", txt_all, flags=re.I | re.S)
+    m_dem_block = re.search(r"\bDEMANDA\b(.{0,800})", txt_all, flags=re.I | re.S)
     if m_dem_block:
         dem_block = m_dem_block.group(1)
         if re.search(r"all[’']impresa", dem_block, flags=re.I):
@@ -291,7 +312,7 @@ if uploaded_files and st.button("Genera XLS"):
         if fields.get("n. Elix", "") == "ELIX":
             st.warning(f"⚠️ Impossibile ricavare n. Elix dal nome file: {uf.name}")
         if not fields.get("N. di protocollo della richiesta P.G.", ""):
-            st.warning(f"⚠️ Numero P.G. non trovato nel testo: {uf.name}")
+            st.warning(f"⚠️ Numero P.G. non trovato nel testo (dopo 'Vista la richiesta P.G. n°'): {uf.name}")
 
     # Ordina per n. Elix crescente
     if order_by_elix:
