@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -82,13 +81,13 @@ def extract_text_from_pdf(file_like) -> str:
     return "\n".join(texts)
 
 # ---------------------------------------------------------
-# Parsing secondo le regole dell’utente
+# Parsing secondo le regole
 # ---------------------------------------------------------
 def parse_fields_from_pdf(filename: str, full_text: str):
     """
     Estrae: OGGETTO, INDIRIZZO, DATA INIZIO, DURATA IN GIORNI, GEOWORKS,
     P.G., Ditta, flag (TPU/ZTL/DEMANDA/PISTA/METRO/BRESCIA MOBILITA'/TAXI),
-    esiti coerenza, eventuale Revoca.
+    esiti coerenza (terzultimo/penultimo/ultimo), eventuale Revoca.
     """
     txt_all = full_text
     txt_low = txt_all.lower()
@@ -177,7 +176,6 @@ def parse_fields_from_pdf(filename: str, full_text: str):
 
     # DEMANDA: 'no D' se dopo 'DEMANDA' compare 'all’impresa'; altrimenti se delega a Settore/Servizio -> 'SQ. MULTIDISC. SI'
     demanda = "no D"
-    # cattura blocco DEMANDA +/- qualche riga
     m_dem_block = re.search(r"DEMANDA(.{0,800})", txt_all, flags=re.I | re.S)
     if m_dem_block:
         dem_block = m_dem_block.group(1)
@@ -230,7 +228,7 @@ st.markdown(
     "**interlinea vuota** tra i dati. Le **date** sono in formato **gg/mm/aaaa**."
 )
 
-# Nessun limite: accetta N file (volendo: accept_multiple_files='directory' per intera cartella)
+# Nessun limite: accetta N file (volendo: 'directory' per intera cartella)
 uploaded_files = st.file_uploader(
     "Seleziona i PDF delle ordinanze",
     type=["pdf"],
