@@ -292,4 +292,4 @@ if uploaded_files and st.button("Genera XLS"):
     # (facoltativo) Piccola anteprima
     st.subheader("Anteprima (prime righe)")
     st.dataframe(df.head(10))
-Update app.py: multiple files
+
