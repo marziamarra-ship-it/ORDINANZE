@@ -6,7 +6,7 @@ from io import BytesIO
 from PyPDF2 import PdfReader
 
 # ---------------------------------------------------------
-# Utility: normalizzazioni & parsing robusto dei campi
+# Utility: normalizzazioni & estrazioni robuste
 # ---------------------------------------------------------
 def one_line(text: str) -> str:
     """Collassa spazi/nuove righe in un singolo rigo."""
@@ -29,8 +29,8 @@ def capitalize_address(addr: str) -> str:
 
 def parse_date_ggmmaaaa(text: str) -> str:
     """
-    Rileva 'gg/mm/aaaa' oppure 'gg Mese aaaa' e restituisce 'gg/mm/aaaa'.
-    Funziona anche con 'Il 29 Dicembre 2025' e 'dal 29 Dicembre 2025'.
+    Rileva 'gg/mm/aaaa' oppure 'gg Mese aaaa' (con o senza 'Il', 'dal')
+    e restituisce 'gg/mm/aaaa'.
     """
     if not text:
         return ""
@@ -63,7 +63,6 @@ def extract_elix_from_filename(filename: str) -> str:
     if not filename:
         return "ELIX"
     base = filename.rsplit("/", 1)[-1]
-    # Togli suffisso .pdf (minuscolo/maiuscolo)
     if base.lower().endswith(".pdf"):
         base = base[:-4]
 
@@ -111,27 +110,31 @@ def get_section(text: str, start_pattern: str, end_pattern: str, flags=re.I | re
     if m2:
         end_idx = start_idx + m2.start()
         return text[start_idx:end_idx]
-    return text[start_idx:]  # fino alla fine se non c'è end
+    return text[start_idx:]
 
 # ---------------------------------------------------------
-# Parsing secondo le regole
+# Parsing secondo le tue regole (con correzioni richieste)
 # ---------------------------------------------------------
 def parse_fields_from_pdf(filename: str, full_text: str):
     """
-    Estrae: OGGETTO, INDIRIZZO, DATA INIZIO, DURATA IN GIORNI, GEOWORKS,
-    P.G., Ditta, flag (TPU/ZTL/DEMANDA/PISTA/METRO/BRESCIA MOBILITA'/TAXI),
-    esiti coerenza (terzultimo/penultimo/ultimo), eventuale Revoca.
+    Estrae i campi richiesti e verifica la coerenza:
+    - DATA INIZIO: OGGETTO vs blocco ORDINA
+    - P.G.: dalla riga 'Vista la richiesta P.G. n° ...' subito dopo 'IL RESPONSABILE DEL SETTORE'
     """
     txt_all = full_text
-    txt_low = txt_all.lower()
 
-    # --- OGGETTO: dopo 'OGGETTO:' fino a 'IL RESPONSABILE...' su un unico rigo
-    obj = ""
+    # --- Blocchi principali
+    # OGGETTO (fino a 'IL RESPONSABILE DEL SETTORE STRADE')
     m_obj = re.search(r"OGGETTO:\s*(.+?)IL RESPONSABILE DEL SETTORE STRADE", txt_all, flags=re.S | re.I)
-    if m_obj:
-        obj = one_line(m_obj.group(1))
+    obj = one_line(m_obj.group(1)) if m_obj else ""
 
-    # --- Revoca (solo se 'OGGETTO:' contiene 'Revoca')
+    # Blocco RESPONSABILE --> fino a ORDINA (serve per P.G.)
+    responsabile_block = get_section(txt_all, r"IL RESPONSABILE DEL SETTORE", r"\bORDINA\b")
+
+    # Blocco ORDINA --> fino a DEMANDA o AVVERTE (serve per data/indirizzo/durata)
+    ordina_block = get_section(txt_all, r"\bORDINA\b", r"\b(DEMANDA|AVVERTE)\b")
+
+    # --- Revoca (solo se OGGETTO contiene 'Revoca')
     revoca = ""
     if re.search(r"OGGETTO:\s*Revoca", txt_all, flags=re.I):
         m_rev = re.search(r"Data la necessità di revocare l’ordinanza P\.G\. n\.[^.\n]*?per\s+([^;]+);", txt_all, flags=re.I)
@@ -144,81 +147,81 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     if m_gw:
         geoworks = m_gw.group(2)
 
-    # --- INDIRIZZO: da oggetto e da corpo; capitalizza; esito coerenza
+    # --- INDIRIZZO: OGGETTO vs ORDINA
     addr_obj = ""
     m_addr_obj = re.search(r"(via\s+[^\-–,]+)", obj, flags=re.I)
     if m_addr_obj:
         addr_obj = one_line(m_addr_obj.group(1))
 
-    addr_body = ""
-    # Se possibile, cerca l'indirizzo nel blocco ORDINA (più vicino alla decisione)
-    ordina_block = get_section(txt_all, r"\bORDINA\b", r"\b(DEMANDA|AVVERTE)\b")
-    m_addr_body = re.search(r"(via\s+[A-Za-z0-9.\sÀ-ù]+)", ordina_block or txt_all, flags=re.I)
-    if m_addr_body:
-        addr_body = one_line(m_addr_body.group(1))
+    addr_ord = ""
+    m_addr_ord = re.search(r"(via\s+[A-Za-z0-9.\sÀ-ù]+)", ordina_block or "", flags=re.I)
+    if m_addr_ord:
+        addr_ord = one_line(m_addr_ord.group(1))
 
-    indirizzo = capitalize_address(addr_obj or addr_body)
+    indirizzo = capitalize_address(addr_obj or addr_ord)
 
     def norm(a): return re.sub(r"\s+", " ", a or "").strip().lower()
     addr_ok = (
-        (addr_obj and addr_body and norm(addr_obj) == norm(addr_body)) or
-        (addr_obj and not addr_body) or
-        (addr_body and not addr_obj)
+        (addr_obj and addr_ord and norm(addr_obj) == norm(addr_ord)) or
+        (addr_obj and not addr_ord) or
+        (addr_ord and not addr_obj)
     )
     esito_indirizzo = "OK Indirizzo" if addr_ok else "INDIRIZZO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- DATA INIZIO: oggetto vs sezione ORDINA (non tutto il corpo)
+    # --- DATA INIZIO: OGGETTO vs ORDINA (solo questi due)
     data_inizio_obj = parse_date_ggmmaaaa(obj)
-    data_inizio_ord = parse_date_ggmmaaaa(ordina_block) if ordina_block else ""
-    # fallback: se non trovata in ORDINA, cerca nel corpo (ma la coerenza si valuta OGGETTO vs ORDINA)
-    data_inizio_body_fallback = parse_date_ggmmaaaa(txt_all) if not data_inizio_ord else ""
-    data_inizio = data_inizio_ord or data_inizio_obj or data_inizio_body_fallback or ""
+    data_inizio_ord = parse_date_ggmmaaaa(ordina_block or "")
+    data_inizio = data_inizio_ord or data_inizio_obj or ""
 
-    esito_inizio = "OK Inizio" if (
-        (data_inizio_obj and data_inizio_ord and data_inizio_obj == data_inizio_ord) or
-        (data_inizio_obj and not data_inizio_ord) or
-        (data_inizio_ord and not data_inizio_obj)
-    ) else "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
+    # Coerenza: se entrambe presenti e uguali -> OK; se una assente -> OK; altrimenti non coerente
+    if (data_inizio_obj and data_inizio_ord and data_inizio_obj == data_inizio_ord) or \
+       (data_inizio_obj and not data_inizio_ord) or \
+       (data_inizio_ord and not data_inizio_obj):
+        esito_inizio = "OK Inizio"
+    else:
+        esito_inizio = "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- DURATA IN GIORNI: se "gg/giorni" prendi numero; se "ore" => 1 (valuta oggetto e ORDINA)
+    # --- DURATA IN GIORNI: se "gg/giorni" prendi numero; se "ore" => 1 (valuta OGGETTO e ORDINA)
     durata_giorni = ""
     m_dur_obj = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", obj, flags=re.I)
+    m_dur_ord = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", ordina_block or "", flags=re.I)
+
     if m_dur_obj:
         durata_giorni = m_dur_obj.group(1)
+    elif m_dur_ord:
+        durata_giorni = m_dur_ord.group(1)
     else:
-        if re.search(r"\bore\b", obj, flags=re.I) or re.search(r"\bore\b", ordina_block or txt_all, flags=re.I):
+        if re.search(r"\bore\b", obj, flags=re.I) or re.search(r"\bore\b", ordina_block or "", flags=re.I):
             durata_giorni = "1"
 
+    # Coerenza DURATA: se entrambe presenti e diverse -> non coerente, altrimenti OK
     esito_durata = "OK Durata"
-    m_dur_ord = re.search(r"durata\s+presunta\s+di\s+(\d+)\s*(gg|giorni)", ordina_block or "", flags=re.I)
-    if m_dur_ord and durata_giorni and (m_dur_ord.group(1) != durata_giorni):
+    if m_dur_obj and m_dur_ord and (m_dur_obj.group(1) != m_dur_ord.group(1)):
         esito_durata = "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # --- P.G.: estrazione dal blocco tra "IL RESPONSABILE..." e "ORDINA"
+    # --- P.G. (numero di protocollo): PRIMA riga con "Vista la richiesta P.G. n° ..." nel blocco RESPONSABILE
     pg = ""
-    responsabile_block = get_section(txt_all, r"IL RESPONSABILE DEL SETTORE", r"\bORDINA\b")
     if responsabile_block:
-        # Cerca "Vista la richiesta P.G. n° 123456/2025"
-        m_pg = re.search(r"Vista\s+la\s+richiesta\s+P\.?\s*G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?", responsabile_block, flags=re.I)
+        m_pg = re.search(
+            r"Vista\s+la\s+richiesta\s+P\.?\s*G\.?\s*n[°o.]?\s*([0-9]+)(?:\s*/\s*\d{2,4})?",
+            responsabile_block,
+            flags=re.I
+        )
         if m_pg:
             pg = m_pg.group(1)
-    # Fallback robusto su tutto il testo in caso di varianti
+
+    # Fallback robusto su tutto il testo (nel caso in cui l'ordinanza sia formattata in modo inconsueto)
     if not pg:
         txt_pg = re.sub(r"\s+", " ", txt_all)
         patterns = [
-            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
-            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*([0-9]+)(?:/\d{2,4})?",
-            r"richiesta\s+P\.?G\.?\s*n[°o]?\s*([0-9]+)(?:/\d{2,4})?",
+            r"(?:P\.?\s*G\.?|PG|P\s*G)\s*n[°o.]?\s*([0-9]+)(?:/\d{2,4})?",
+            r"richiesta\s+P\.?G\.?\s*n[°o.]?\s*([0-9]+)(?:/\d{2,4})?",
         ]
         for pat in patterns:
             m2 = re.search(pat, txt_pg, flags=re.I)
             if m2:
                 pg = m2.group(1)
                 break
-        if not pg:
-            m3 = re.search(r"(?:P\.?\s*G\.?|PG|P\s*G)[^0-9]{0,20}([0-9]+)(?:/\d{2,4})?", txt_pg, flags=re.I)
-            if m3:
-                pg = m3.group(1)
 
     # --- Ditta / richiedente: dopo 'ditta ...' fino a virgola/;/\n
     ditta = ""
@@ -228,6 +231,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
         ditta = " ".join([w.capitalize() for w in ditta.split()])
 
     # --- Flag vari
+    txt_low = txt_all.lower()
     tpu = "TRASPORTO_SI" if re.search(r"(trasporto pubblico urbano|linee bus|trasporto pubblico)", txt_low, flags=re.I) else "no T"
     ztl = "ZTL_SI" if re.search(r"\bztl\b|portali", txt_low, flags=re.I) else "no Z"
 
@@ -285,17 +289,16 @@ st.markdown(
     "**interlinea vuota** tra i dati. Le **date** sono in formato **gg/mm/aaaa**."
 )
 
-# Nessun limite: accetta N file (volendo: 'directory' per intera cartella)
 uploaded_files = st.file_uploader(
     "Seleziona i PDF delle ordinanze",
     type=["pdf"],
-    accept_multiple_files=True   # <-- NESSUN LIMITE LATO WIDGET
+    accept_multiple_files=True
 )
 
 order_by_elix = st.checkbox("Ordina colonne per n. Elix (crescente)", value=True)
 
 # ---------------------------------------------------------
-# BLOCCO "Genera XLS" (fa parte di app.py)
+# BLOCCO "Genera XLS"
 # ---------------------------------------------------------
 if uploaded_files and st.button("Genera XLS"):
     records = []
@@ -308,11 +311,11 @@ if uploaded_files and st.button("Genera XLS"):
         records.append((uf.name, fields))
         progress.progress(int(idx / total * 100))
 
-        # AVVISI per campi critici mancanti
+        # Warning se campi critici mancanti
         if fields.get("n. Elix", "") == "ELIX":
             st.warning(f"⚠️ Impossibile ricavare n. Elix dal nome file: {uf.name}")
         if not fields.get("N. di protocollo della richiesta P.G.", ""):
-            st.warning(f"⚠️ Numero P.G. non trovato nel testo (dopo 'Vista la richiesta P.G. n°'): {uf.name}")
+            st.warning(f"⚠️ Numero P.G. non trovato nel blocco 'Vista la richiesta P.G. n°': {uf.name}")
 
     # Ordina per n. Elix crescente
     if order_by_elix:
