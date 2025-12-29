@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -16,7 +15,9 @@ def one_line(text: str) -> str:
     t = re.sub(r"\s+", " ", text).strip()
     # Collassa spazi interni tra cifre: "2 9" -> "29", "1 2" -> "12"
     t = re.sub(r"(?<=\d)\s+(?=\d)", "", t)
-    # Fix mirati
+    # Fix mirati su preposizioni/articoli spezzati
+    t = re.sub(r"\bd\s+el\b", "del", t, flags=re.I)
+    t = re.sub(r"\ba\s+lle\b", "alle", t, flags=re.I)
     t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
     t = re.sub(r"\bgiorn\s+i\b", "giorni", t, flags=re.I)
     # Toponimi spezzati da OCR: "V icolo", "V ia", "C orso", "P iazza", "V iale"
