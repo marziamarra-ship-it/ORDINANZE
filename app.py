@@ -1,3 +1,4 @@
+
 # app.py
 import streamlit as st
 import pandas as pd
@@ -9,13 +10,13 @@ from PyPDF2 import PdfReader
 # Utility: normalizzazioni / OCR
 # ===========================
 def one_line(text: str) -> str:
-    """Collassa spazi e ripulisce artefatti OCR (specie cifre e toponimi spezzati)."""
+    """Collassa spazi e ripulisce artefatti OCR (cifre e toponimi/nomi spezzati)."""
     if not text:
         return ""
     t = re.sub(r"\s+", " ", text).strip()
     # Collassa spazi interni tra cifre: "2 9" -> "29", "1 2" -> "12"
     t = re.sub(r"(?<=\d)\s+(?=\d)", "", t)
-    # Fix mirati su preposizioni/articoli spezzati
+    # Fix su preposizioni/articoli spezzati
     t = re.sub(r"\bd\s+el\b", "del", t, flags=re.I)
     t = re.sub(r"\ba\s+lle\b", "alle", t, flags=re.I)
     t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
@@ -27,6 +28,15 @@ def one_line(text: str) -> str:
     t = re.sub(r"\b[Pp]\s*iazza\b", "piazza", t)
     t = re.sub(r"\b[Vv]\s*iale\b", "viale", t)
     return t
+
+def fix_internal_splits(s: str) -> str:
+    """
+    Unisce parole spezzate dall'OCR (es. 'Vill aggio'->'Villaggio', 'S ogem'->'Sogem').
+    Limitato a pattern 'lettera + parola' per non fondere parole distinte.
+    """
+    if not s:
+        return ""
+    return re.sub(r"\b([A-Za-z])\s+([A-Za-z]{2,})\b", r"\1\2", s)
 
 def capitalize_mixed(s: str) -> str:
     """Iniziali maiuscole; preserva iniziali con punto (es. 'B.') e acronimi."""
@@ -79,7 +89,7 @@ MESE2NUM = {
 }
 
 def parse_date_ggmmaaaa(text: str) -> str:
-    """Priorità a forma testuale (13 gennaio 2025), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
+    """Priorità a forma testuale (es. 2 Gennaio 2026), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
     if not text:
         return ""
     t = one_line(text)
@@ -167,6 +177,7 @@ def clean_address(s: str) -> str:
     if not s:
         return ""
     s1 = one_line(s)
+    s1 = fix_internal_splits(s1)  # unisce 'Vill aggio', 'V ia', etc.
     m = ADDR_STOPS.search(s1)
     if m:
         s1 = s1[:m.start()].strip()
@@ -177,20 +188,24 @@ def clean_address(s: str) -> str:
 def base_street_name(addr: str) -> str:
     """
     Basi di confronto per la coerenza: solo 'toponimo + primo/i nomi'.
-    Es.: 'Via B. Montagna', 'Vicolo Della Quiete', 'Via Toscana'.
+    Ignora preposizioni: al/allo/alla/alle/ai/agli/all.
     """
     if not addr:
         return ""
     tokens = addr.split()
     stop_tokens = {"nel", "nella", "della", "del", "dei", "degli", "delle", "tronco", "tratto", "intersezione"}
+    skip_tokens = {"al", "allo", "alla", "alle", "ai", "agli", "all"}
     base = []
     for w in tokens:
-        if w.lower() in stop_tokens:
+        wl = w.lower()
+        if wl in skip_tokens:
+            continue
+        if wl in stop_tokens:
             break
-        base.append(w)
+        base.append(wl)
         if len(base) >= 4:  # bastano 3-4 parole per identificare la via
             break
-    return " ".join(base).lower().strip()
+    return " ".join(base).strip()
 
 # ===========================
 # Parsing principale dei campi
@@ -216,7 +231,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     geoworks = " "
     m_gw = re.search(r"(?:Codice\s*Geo\s*Works|Geo\s*Works|Geoworks)\s*:\s*([A-Za-z0-9\-_\.]+)", obj, flags=re.I)
     if m_gw:
-        geoworks = m_gw.group(1)
+        geoworks = m_gw.group(1).rstrip(".; ")
 
     # INDIRIZZO: cerca in OGGETTO, altrimenti in ORDINA; pulizia ai delimitatori
     addr_obj = ""
@@ -230,7 +245,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
 
     indirizzo = addr_obj or addr_ord
 
-    # Coerenza indirizzo (su basi pulite)
+    # Coerenza indirizzo (su basi pulite e ignorando preposizioni)
     addr_obj_base = base_street_name(addr_obj)
     addr_ord_base = base_street_name(addr_ord)
     addr_ok = (
@@ -272,7 +287,9 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     ditta = ""
     m_ditta = re.search(r"(?:della\s+ditta|ditta)\s+(.+?)(?:,|;|\n)", txt_all, flags=re.I)
     if m_ditta:
-        ditta = capitalize_mixed(one_line(m_ditta.group(1)))
+        raw = one_line(m_ditta.group(1))
+        raw = fix_internal_splits(raw)             # unisce 'S ogem' -> 'Sogem'
+        ditta = capitalize_mixed(raw)
 
     # Flag vari
     low = txt_all.lower()
@@ -288,7 +305,12 @@ def parse_fields_from_pdf(filename: str, full_text: str):
             demanda = "SQ. MULTIDISC. SI"
 
     pista = "PISTA CICLABILE SI" if re.search(r"pista ciclabile", low, flags=re.I) else "no P"
-    metro = "METRO SI" if re.search(r"\bmetro\b|metropolitana", low, flags=re.I) else "no M"
+
+    # METRO: segna SI solo se sono citate fermate/stazioni metro
+    metro = "no M"
+    if re.search(r"(fermata|stazione)\s+(?:della\s+)?(?:metropolitana|metro)", low, flags=re.I):
+        metro = "METRO SI"
+
     bsm = "BRESCIA MOBILITA' SI" if re.search(r"brescia mobilita", low, flags=re.I) else "no B"
     taxi = "TAXI SI" if re.search(r"\btaxi\b", low, flags=re.I) else "no T"
 
