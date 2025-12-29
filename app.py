@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -10,7 +9,7 @@ from PyPDF2 import PdfReader
 # Utility: normalizzazioni / OCR
 # ===========================
 def one_line(text: str) -> str:
-    """Collassa spazi e ripulisce artefatti OCR (specie cifre spezzate)."""
+    """Collassa spazi e ripulisce artefatti OCR (specie cifre e toponimi spezzati)."""
     if not text:
         return ""
     t = re.sub(r"\s+", " ", text).strip()
@@ -19,6 +18,12 @@ def one_line(text: str) -> str:
     # Fix mirati
     t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
     t = re.sub(r"\bgiorn\s+i\b", "giorni", t, flags=re.I)
+    # Toponimi spezzati da OCR: "V icolo", "V ia", "C orso", "P iazza", "V iale"
+    t = re.sub(r"\b[Vv]\s*icolo\b", "vicolo", t)
+    t = re.sub(r"\b[Vv]\s*ia\b", "via", t)
+    t = re.sub(r"\b[Cc]\s*orso\b", "corso", t)
+    t = re.sub(r"\b[Pp]\s*iazza\b", "piazza", t)
+    t = re.sub(r"\b[Vv]\s*iale\b", "viale", t)
     return t
 
 def capitalize_mixed(s: str) -> str:
@@ -72,7 +77,7 @@ MESE2NUM = {
 }
 
 def parse_date_ggmmaaaa(text: str) -> str:
-    """Priorità a forma testuale (29 Dicembre 2025), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
+    """Priorità a forma testuale (13 gennaio 2025), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
     if not text:
         return ""
     t = one_line(text)
