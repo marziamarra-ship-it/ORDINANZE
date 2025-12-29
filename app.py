@@ -1,3 +1,4 @@
+
 # app.py
 import streamlit as st
 import pandas as pd
@@ -5,36 +6,38 @@ import re
 from io import BytesIO
 from PyPDF2 import PdfReader
 
-# -----------------------------
+# ===========================
 # Utility: normalizzazioni / OCR
-# -----------------------------
+# ===========================
 def one_line(text: str) -> str:
     """Collassa spazi e ripulisce artefatti OCR (specie cifre spezzate)."""
     if not text:
         return ""
     t = re.sub(r"\s+", " ", text).strip()
-    # 1) Collassa spazi interni tra cifre: "2 9"->"29", "1 2"->"12"
+    # Collassa spazi interni tra cifre: "2 9" -> "29", "1 2" -> "12"
     t = re.sub(r"(?<=\d)\s+(?=\d)", "", t)
-    # 2) Fix mirati tipici
+    # Fix mirati
     t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
     t = re.sub(r"\bgiorn\s+i\b", "giorni", t, flags=re.I)
-    t = t.replace("0 8.00", "08.00")
     return t
 
 def capitalize_mixed(s: str) -> str:
+    """Iniziali maiuscole; preserva iniziali con punto (es. 'B.') e acronimi."""
     if not s:
         return ""
     out = []
     for w in s.split():
-        if re.match(r"^[A-Z]\.$", w) or w.upper() in {"S.N.C.", "S.R.L.", "S.P.A.", "SAS", "SS", "SRL", "SPA"}:
+        if re.match(r"^[A-Z]\.$", w):             # es. "B."
+            out.append(w)                          # mantieni l'iniziale con punto
+        elif w.upper() in {"S.N.C.", "S.R.L.", "S.P.A.", "SAS", "SS", "SRL", "SPA"}:
             out.append(w.upper())
         else:
             out.append(w.capitalize())
     return " ".join(out)
 
-# -----------------------------
+# ===========================
 # Estrazione testo PDF
-# -----------------------------
+# ===========================
 def extract_text_from_pdf(file_like) -> str:
     reader = PdfReader(file_like)
     parts = []
@@ -43,10 +46,11 @@ def extract_text_from_pdf(file_like) -> str:
         parts.append(t)
     return "\n".join(parts)
 
-# -----------------------------
+# ===========================
 # Sezioni documento
-# -----------------------------
+# ===========================
 def get_section(text: str, start_pattern: str, end_pattern: str, flags=re.I | re.S) -> str:
+    """Sottostringa tra gli estremi (esclusi); se end non trovato, ritorna fino a fine testo."""
     if not text:
         return ""
     m = re.search(start_pattern, text, flags=flags)
@@ -59,9 +63,9 @@ def get_section(text: str, start_pattern: str, end_pattern: str, flags=re.I | re
         return text[start_idx:end_idx]
     return text[start_idx:]
 
-# -----------------------------
+# ===========================
 # Date e durate
-# -----------------------------
+# ===========================
 MESE2NUM = {
     "gennaio":"01","febbraio":"02","marzo":"03","aprile":"04","maggio":"05","giugno":"06",
     "luglio":"07","agosto":"08","settembre":"09","ottobre":"10","novembre":"11","dicembre":"12"
@@ -91,23 +95,30 @@ def parse_date_ggmmaaaa(text: str) -> str:
     return ""
 
 def extract_days(text: str) -> str:
-    """Robusto a OCR: estrae 12 da '12 gg', '1 2 gg', '12 giorni', 'g i o r n i' ecc."""
+    """
+    Estrae '12' da: '12 gg', '1 2 gg', '12 giorni', '1 giorno',
+    anche se 'giorni' è spezzato da OCR ('g i o r n i').
+    """
     if not text:
         return ""
     t = one_line(text).lower()
-    # numero con spazi interni tra cifre (+ parole gg/giorni anche 'spezzate')
-    m = re.search(r"\b((?:\d\s*){1,3})\s*(?:gg\.?|g\s*g\.?|g\s*i\s*o\s*r\s*n\s*i|giorni?)\b", t, flags=re.I)
+    m = re.search(r"\b((?:\d\s*){1,3})\s*(?:gg\.?|g\s*g\.?|g\s*i\s*o\s*r\s*n\s*i|giorn(?:o|i))\b", t, flags=re.I)
     return re.sub(r"\s+", "", m.group(1)) if m else ""
 
 def has_hours(text: str) -> bool:
+    """True se è presente 'X ore'."""
     if not text:
         return False
     return re.search(r"\b(\d{1,3})\s*ore\b", text, flags=re.I) is not None
 
-# -----------------------------
+# ===========================
 # ELIX dal nome file
-# -----------------------------
+# ===========================
 def extract_elix_from_filename(filename: str) -> str:
+    """
+    Ultimo numero alla fine del nome PDF, dopo l’ultimo '_', senza zeri iniziali.
+    Se non presente, 'ELIX'.
+    """
     if not filename:
         return "ELIX"
     base = filename.split("/")[-1]
@@ -120,10 +131,11 @@ def extract_elix_from_filename(filename: str) -> str:
     m = re.search(r"(\d+)$", base)
     return str(int(m.group(1))) if m else "ELIX"
 
-# -----------------------------
+# ===========================
 # P.G. (numero prima dello slash)
-# -----------------------------
+# ===========================
 def extract_pg(text_block: str, full_text: str) -> str:
+    """Estrae il numero P.G. (solo numeri, senza '/anno')."""
     def pick(s: str) -> str:
         if not s: return ""
         s1 = one_line(s)
@@ -131,30 +143,51 @@ def extract_pg(text_block: str, full_text: str) -> str:
         return m.group(1) if m else ""
     return pick(text_block) or pick(full_text)
 
-# -----------------------------
-# Indirizzo: solo toponimo + nome, tronco ai delimitatori
-# -----------------------------
+# ===========================
+# Indirizzo: toponimi + pulizia ai delimitatori
+# ===========================
 STREET_PREFIX = r"(?:via|viale|corso|piazza|largo|piazzale|contrada|vicolo|galleria|tangenziale|strada|rotonda|cavalcavia|lungo|lung|p\.?zza|parco|sp|ss|sr)"
 STREET_RGX = re.compile(rf"\b({STREET_PREFIX}\s+[A-Za-zÀ-ÖØ-öø-ÿ0-9./\- ]+)", re.I)
 
+# NON fermarsi su un singolo "." (serve per iniziali tipo "B.")
 ADDR_STOPS = re.compile(
-    r"\s*(?:[-–—]\s*|,|;|\.|\bprovvedimenti\b|\bdivieto\b|\bdalle\b|\bdal\b|\bdel\b|\bdurata\b|\bper\b)",
+    r"\s*(?:[-–—]\s*|,|;|\bprovvedimenti\b|\bdivieto\b|\bdalle\b|\bdal\b|\bdel\b|\bdurata\b|\bper\b|\btratto\b|\bintersezione\b|\btronco\b|\ball[’']?\b|\balla\b|\balle\b)",
     re.I
 )
 
 def clean_address(s: str) -> str:
+    """Restituisce solo 'toponimo + nome' ripulito (capitalizzazione corretta)."""
     if not s:
         return ""
     s1 = one_line(s)
     m = ADDR_STOPS.search(s1)
     if m:
         s1 = s1[:m.start()].strip()
+    # taglia altre code descrittive
     s1 = re.split(r"\b(in prossimità|lato|nei pressi|area|zone|civico|civici)\b", s1, flags=re.I)[0].strip()
     return capitalize_mixed(s1)
 
-# -----------------------------
-# Parsing principale
-# -----------------------------
+def base_street_name(addr: str) -> str:
+    """
+    Basi di confronto per la coerenza: solo 'toponimo + primo/i nomi'.
+    Es.: 'Via B. Montagna', 'Vicolo Della Quiete', 'Via Toscana'.
+    """
+    if not addr:
+        return ""
+    tokens = addr.split()
+    stop_tokens = {"nel", "nella", "della", "del", "dei", "degli", "delle", "tronco", "tratto", "intersezione"}
+    base = []
+    for w in tokens:
+        if w.lower() in stop_tokens:
+            break
+        base.append(w)
+        if len(base) >= 4:  # bastano 3-4 parole per identificare la via
+            break
+    return " ".join(base).lower().strip()
+
+# ===========================
+# Parsing principale dei campi
+# ===========================
 def parse_fields_from_pdf(filename: str, full_text: str):
     txt_all = full_text
 
@@ -167,17 +200,18 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     # Revoca (eventuale)
     revoca = ""
     if re.search(r"OGGETTO:\s*Revoca", txt_all, flags=re.I):
+        # riporta ciò che c'è dopo "per" (escluso) fino al ';' escluso
         m_rev = re.search(r"Data la necessità di revocare l’ordinanza P\.G\. n\.[^.;\n]*?per\s+([^;]+);", txt_all, flags=re.I)
         if m_rev:
             revoca = one_line(m_rev.group(1))
 
-    # GeoWorks
+    # GeoWorks (solo se presente in OGGETTO)
     geoworks = " "
     m_gw = re.search(r"(?:Codice\s*Geo\s*Works|Geo\s*Works|Geoworks)\s*:\s*([A-Za-z0-9\-_\.]+)", obj, flags=re.I)
     if m_gw:
         geoworks = m_gw.group(1)
 
-    # INDIRIZZO: OGGETTO poi ORDINA; pulizia ai delimitatori
+    # INDIRIZZO: cerca in OGGETTO, altrimenti in ORDINA; pulizia ai delimitatori
     addr_obj = ""
     mo = STREET_RGX.search(obj)
     if mo:
@@ -189,16 +223,17 @@ def parse_fields_from_pdf(filename: str, full_text: str):
 
     indirizzo = addr_obj or addr_ord
 
-    # Coerenza indirizzo (solo tra OGGETTO e ORDINA)
-    def norm(a): return re.sub(r"\s+", " ", a or "").strip().lower()
+    # Coerenza indirizzo (su basi pulite)
+    addr_obj_base = base_street_name(addr_obj)
+    addr_ord_base = base_street_name(addr_ord)
     addr_ok = (
-        (addr_obj and addr_ord and norm(addr_obj) == norm(addr_ord)) or
-        (addr_obj and not addr_ord) or
-        (addr_ord and not addr_obj)
+        (addr_obj_base and addr_ord_base and (addr_obj_base == addr_ord_base)) or
+        (addr_obj_base and not addr_ord_base) or
+        (addr_ord_base and not addr_obj_base)
     )
     esito_indirizzo = "OK Indirizzo" if addr_ok else "INDIRIZZO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # DATA INIZIO
+    # DATA INIZIO (OGGETTO/ORDINA)
     data_inizio_obj = parse_date_ggmmaaaa(obj)
     data_inizio_ord = parse_date_ggmmaaaa(ordina_block or "")
     data_inizio = data_inizio_ord or data_inizio_obj or ""
@@ -209,7 +244,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     else:
         esito_inizio = "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA"
 
-    # DURATA: priorità ORDINA, poi OGGETTO; se solo ore -> 1
+    # DURATA: priorità ORDINA, poi OGGETTO; se solo 'ore' -> 1
     giorni_ord = extract_days(ordina_block or "")
     giorni_obj = extract_days(obj)
     if giorni_ord:
@@ -226,7 +261,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     # P.G.
     pg = extract_pg(responsabile_block, txt_all)
 
-    # Ditta
+    # Ditta / richiedente
     ditta = ""
     m_ditta = re.search(r"(?:della\s+ditta|ditta)\s+(.+?)(?:,|;|\n)", txt_all, flags=re.I)
     if m_ditta:
@@ -268,15 +303,16 @@ def parse_fields_from_pdf(filename: str, full_text: str):
         "METRO": metro,
         "BRESCIA MOBILITA'": bsm,
         "TAXI": taxi,
+        # Esiti coerenza (terzultimo/penultimo/ultimo)
         "Terzultimo": "OK Indirizzo" if esito_indirizzo == "OK Indirizzo" else "INDIRIZZO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
         "Penultimo": "OK Inizio" if esito_inizio == "OK Inizio" else "DATA INIZIO NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
         "Ultimo": "OK Durata" if esito_durata == "OK Durata" else "DURATA IN GIORNI NON COERENTE TRA OGGETTO E TESTO DELL’ORDINANZA",
         "Revoca (se presente)": revoca,
     }
 
-# -----------------------------
+# ===========================
 # STREAMLIT UI
-# -----------------------------
+# ===========================
 st.set_page_config(page_title="XLS Ordinanze - Settore Strade", layout="centered")
 st.title("XLS Ordinanze - Estrazione automatica")
 st.markdown(
@@ -301,11 +337,13 @@ if uploaded_files and st.button("Genera XLS"):
         records.append((uf.name, fields))
         progress.progress(int(idx / total * 100))
 
+        # Warning se campi critici mancanti
         if fields.get("n. Elix", "") == "ELIX":
             st.warning(f"⚠️ ELIX non ricavato dal nome file: {uf.name}")
         if not fields.get("N. di protocollo della richiesta P.G.", ""):
             st.warning(f"⚠️ Numero P.G. non trovato: {uf.name}")
 
+        # Diagnostica (opzionale)
         if show_diag:
             m_obj = re.search(r"OGGETTO:\s*(.+?)IL RESPONSABILE DEL SETTORE STRADE", pdf_text, flags=re.S | re.I)
             obj_block = one_line(m_obj.group(1)) if m_obj else ""
@@ -320,6 +358,7 @@ if uploaded_files and st.button("Genera XLS"):
                 "Esito data": "OK Inizio" if fields.get("Penultimo") == "OK Inizio" else "NON COERENTE",
             })
 
+    # Ordina per n. Elix crescente
     if order_by_elix:
         def elix_key(item):
             try:
@@ -328,6 +367,7 @@ if uploaded_files and st.button("Genera XLS"):
                 return 999999
         records.sort(key=elix_key)
 
+    # Indice con righe + righe vuote
     row_labels = [
         "n. Elix", "", "OGGETTO", "", "INDIRIZZO", "", "DATA INIZIO", "", "DURATA IN GIORNI", "",
         "GEOWORKS", "", "N. di protocollo della richiesta P.G.", "", "Nome della ditta", "",
@@ -343,6 +383,7 @@ if uploaded_files and st.button("Genera XLS"):
 
     df = pd.DataFrame(excel_data, index=row_labels)
 
+    # Esporta Excel in memoria
     try:
         xls_buffer = BytesIO()
         with pd.ExcelWriter(xls_buffer, engine="openpyxl") as writer:
@@ -357,6 +398,7 @@ if uploaded_files and st.button("Genera XLS"):
     except Exception as e:
         st.error(f"Errore durante la generazione dell'Excel: {e}")
 
+    # Diagnostica (opzionale)
     if show_diag:
         st.subheader("Diagnostica (Data/Durata OGGETTO vs ORDINA)")
         if diag_rows:
