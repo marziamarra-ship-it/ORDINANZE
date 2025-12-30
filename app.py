@@ -1,4 +1,3 @@
-
 # app.py
 import streamlit as st
 import pandas as pd
@@ -21,7 +20,7 @@ def one_line(text: str) -> str:
     t = re.sub(r"\ba\s+lle\b", "alle", t, flags=re.I)
     t = re.sub(r"\bdal\s+le\b", "dalle", t, flags=re.I)
     t = re.sub(r"\bgiorn\s+i\b", "giorni", t, flags=re.I)
-    # Toponimi spezzati da OCR: "V icolo", "V ia", "C orso", "P iazza", "V iale"
+    # Toponimi spezzati da OCR
     t = re.sub(r"\b[Vv]\s*icolo\b", "vicolo", t)
     t = re.sub(r"\b[Vv]\s*ia\b", "via", t)
     t = re.sub(r"\b[Cc]\s*orso\b", "corso", t)
@@ -89,7 +88,7 @@ MESE2NUM = {
 }
 
 def parse_date_ggmmaaaa(text: str) -> str:
-    """Priorità a forma testuale (es. 2 Gennaio 2026), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
+    """Priorità a forma testuale (es. 19 giugno 2025), poi gg/mm/aaaa. Ritorna gg/mm/aaaa."""
     if not text:
         return ""
     t = one_line(text)
@@ -133,20 +132,17 @@ def has_hours(text: str) -> bool:
 # ===========================
 def extract_elix_from_filename(filename: str) -> str:
     """
-    Ultimo numero alla fine del nome PDF, dopo l’ultimo '_', senza zeri iniziali.
-    Se non presente, 'ELIX'.
+    Ricava l'ultimo gruppo di cifre presente nel nome (prima dell'estensione),
+    anche se dopo ci sono suffissi come '_signed'. Se non presente, 'ELIX'.
     """
     if not filename:
         return "ELIX"
     base = filename.split("/")[-1]
     if base.lower().endswith(".pdf"):
         base = base[:-4]
-    if "_" in base:
-        tail = base.rsplit("_", 1)[-1]
-        if re.fullmatch(r"\d+", tail):
-            return str(int(tail))
-    m = re.search(r"(\d+)$", base)
-    return str(int(m.group(1))) if m else "ELIX"
+    # Trova tutti i gruppi di cifre nel nome e prendi l'ultimo
+    nums = re.findall(r"(\d+)", base)
+    return str(int(nums[-1])) if nums else "ELIX"
 
 # ===========================
 # P.G. (numero prima dello slash)
@@ -163,7 +159,8 @@ def extract_pg(text_block: str, full_text: str) -> str:
 # ===========================
 # Indirizzo: toponimi + pulizia ai delimitatori
 # ===========================
-STREET_PREFIX = r"(?:via|viale|corso|piazza|largo|piazzale|contrada|vicolo|galleria|tangenziale|strada|rotonda|cavalcavia|lungo|lung|p\.?zza|parco|sp|ss|sr)"
+# ⚠️ Alternanze corrette + abbreviazioni: include 'c\.?so' (C.so = Corso)
+STREET_PREFIX = r"(?:via|viale|corso|c\.?so|piazza|largo|piazzale|contrada|vicolo|galleria|tangenziale|strada|rotonda|cavalcavia|lungo|lung|p\.?zza|parco|sp|ss|sr)"
 STREET_RGX = re.compile(rf"\b({STREET_PREFIX}\s+[A-Za-zÀ-ÖØ-öø-ÿ0-9./\- ]+)", re.I)
 
 # NON fermarsi su un singolo "." (serve per iniziali tipo "B.")
@@ -222,7 +219,6 @@ def parse_fields_from_pdf(filename: str, full_text: str):
     # Revoca (eventuale)
     revoca = ""
     if re.search(r"OGGETTO:\s*Revoca", txt_all, flags=re.I):
-        # riporta ciò che c'è dopo "per" (escluso) fino al ';' escluso
         m_rev = re.search(r"Data la necessità di revocare l’ordinanza P\.G\. n\.[^.;\n]*?per\s+([^;]+);", txt_all, flags=re.I)
         if m_rev:
             revoca = one_line(m_rev.group(1))
@@ -305,8 +301,7 @@ def parse_fields_from_pdf(filename: str, full_text: str):
             demanda = "SQ. MULTIDISC. SI"
 
     pista = "PISTA CICLABILE SI" if re.search(r"pista ciclabile", low, flags=re.I) else "no P"
-
-    # METRO: segna SI solo se sono citate fermate/stazioni metro
+    # METRO: SI se compaiono fermate/stazioni metropolitana/metro
     metro = "no M"
     if re.search(r"(fermata|stazione)\s+(?:della\s+)?(?:metropolitana|metro)", low, flags=re.I):
         metro = "METRO SI"
